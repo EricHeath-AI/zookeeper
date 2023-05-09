@@ -20,21 +20,20 @@ package org.apache.zookeeper.server.admin;
 
 import java.io.IOException;
 import java.security.GeneralSecurityException;
-import java.security.KeyStore;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import javax.net.ssl.SSLContext;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+
 import org.apache.zookeeper.common.QuorumX509Util;
 import org.apache.zookeeper.common.SecretUtils;
-import org.apache.zookeeper.common.X509Util;
+import org.apache.zookeeper.common.X509Exception;
 import org.apache.zookeeper.server.ZooKeeperServer;
-import org.apache.zookeeper.server.auth.IPAuthenticationProvider;
-import org.eclipse.jetty.http.HttpHeader;
 import org.eclipse.jetty.http.HttpVersion;
 import org.eclipse.jetty.security.ConstraintMapping;
 import org.eclipse.jetty.security.ConstraintSecurityHandler;
@@ -84,25 +83,23 @@ public class JettyAdminServer implements AdminServer {
 
     public JettyAdminServer() throws AdminServerException, IOException, GeneralSecurityException {
         this(
-            System.getProperty("zookeeper.admin.serverAddress", DEFAULT_ADDRESS),
-            Integer.getInteger("zookeeper.admin.serverPort", DEFAULT_PORT),
-            Integer.getInteger("zookeeper.admin.idleTimeout", DEFAULT_IDLE_TIMEOUT),
-            System.getProperty("zookeeper.admin.commandURL", DEFAULT_COMMAND_URL),
-            Integer.getInteger("zookeeper.admin.httpVersion", DEFAULT_HTTP_VERSION),
-            Boolean.getBoolean("zookeeper.admin.portUnification"),
-            Boolean.getBoolean("zookeeper.admin.forceHttps"),
-            Boolean.getBoolean("zookeeper.admin.needClientAuth"));
+                System.getProperty("zookeeper.admin.serverAddress", DEFAULT_ADDRESS),
+                Integer.getInteger("zookeeper.admin.serverPort", DEFAULT_PORT),
+                Integer.getInteger("zookeeper.admin.idleTimeout", DEFAULT_IDLE_TIMEOUT),
+                System.getProperty("zookeeper.admin.commandURL", DEFAULT_COMMAND_URL),
+                Integer.getInteger("zookeeper.admin.httpVersion", DEFAULT_HTTP_VERSION),
+                Boolean.getBoolean("zookeeper.admin.portUnification"),
+                Boolean.getBoolean("zookeeper.admin.forceHttps"));
     }
 
     public JettyAdminServer(
-        String address,
-        int port,
-        int timeout,
-        String commandUrl,
-        int httpVersion,
-        boolean portUnification,
-        boolean forceHttps,
-        boolean needClientAuth) throws IOException, GeneralSecurityException {
+            String address,
+            int port,
+            int timeout,
+            String commandUrl,
+            int httpVersion,
+            boolean portUnification,
+            boolean forceHttps) throws IOException, GeneralSecurityException {
 
         this.port = port;
         this.idleTimeout = timeout;
@@ -124,35 +121,17 @@ public class JettyAdminServer implements AdminServer {
             config.addCustomizer(customizer);
 
             try (QuorumX509Util x509Util = new QuorumX509Util()) {
-                String privateKeyType = System.getProperty(x509Util.getSslKeystoreTypeProperty(), "");
-                String privateKeyPath = System.getProperty(x509Util.getSslKeystoreLocationProperty(), "");
-                String privateKeyPassword = getPasswordFromSystemPropertyOrFile(
-                        x509Util.getSslKeystorePasswdProperty(),
-                        x509Util.getSslKeystorePasswdPathProperty());
 
-                String certAuthType = System.getProperty(x509Util.getSslTruststoreTypeProperty(), "");
-                String certAuthPath = System.getProperty(x509Util.getSslTruststoreLocationProperty(), "");
-                String certAuthPassword = getPasswordFromSystemPropertyOrFile(
-                        x509Util.getSslTruststorePasswdProperty(),
-                        x509Util.getSslTruststorePasswdPathProperty());
-                KeyStore keyStore = null, trustStore = null;
-
+                SSLContext defaultSSLContext;
                 try {
-                    keyStore = X509Util.loadKeyStore(privateKeyPath, privateKeyPassword, privateKeyType);
-                    trustStore = X509Util.loadTrustStore(certAuthPath, certAuthPassword, certAuthType);
-                    LOG.info("Successfully loaded private key from {}", privateKeyPath);
-                    LOG.info("Successfully loaded certificate authority from {}", certAuthPath);
-                } catch (Exception e) {
-                    LOG.error("Failed to load authentication certificates for admin server.", e);
-                    throw e;
+                    defaultSSLContext = x509Util.getDefaultSSLContext();
+                } catch (X509Exception.SSLContextException e) {
+                    LOG.error("Failed to load SSL context", e);
+                    throw new RuntimeException("Failed to load SSL context", e);
                 }
 
-                SslContextFactory.Server sslContextFactory = new SslContextFactory.Server();
-                sslContextFactory.setKeyStore(keyStore);
-                sslContextFactory.setKeyStorePassword(privateKeyPassword);
-                sslContextFactory.setTrustStore(trustStore);
-                sslContextFactory.setTrustStorePassword(certAuthPassword);
-                sslContextFactory.setNeedClientAuth(needClientAuth);
+                SslContextFactory sslContextFactory = new SslContextFactory.Server();
+                sslContextFactory.setSslContext(defaultSSLContext);
 
                 if (forceHttps) {
                     connector = new ServerConnector(server,
@@ -192,10 +171,10 @@ public class JettyAdminServer implements AdminServer {
             // Server.start() only throws Exception, so let's at least wrap it
             // in an identifiable subclass
             String message = String.format(
-                "Problem starting AdminServer on address %s, port %d and command URL %s",
-                address,
-                port,
-                commandUrl);
+                    "Problem starting AdminServer on address %s, port %d and command URL %s",
+                    address,
+                    port,
+                    commandUrl);
             throw new AdminServerException(message, e);
         }
         LOG.info("Started AdminServer on address {}, port {} and command URL {}", address, port, commandUrl);
@@ -214,10 +193,10 @@ public class JettyAdminServer implements AdminServer {
             server.stop();
         } catch (Exception e) {
             String message = String.format(
-                "Problem stopping AdminServer on address %s, port %d and command URL %s",
-                address,
-                port,
-                commandUrl);
+                    "Problem stopping AdminServer on address %s, port %d and command URL %s",
+                    address,
+                    port,
+                    commandUrl);
             throw new AdminServerException(message, e);
         }
     }
@@ -240,10 +219,9 @@ public class JettyAdminServer implements AdminServer {
 
         private static final long serialVersionUID = 1L;
 
-        @Override
         protected void doGet(
-            HttpServletRequest request,
-            HttpServletResponse response) throws ServletException, IOException {
+                HttpServletRequest request,
+                HttpServletResponse response) throws ServletException, IOException {
             // Capture the command name from the URL
             String cmd = request.getPathInfo();
             if (cmd == null || cmd.equals("/")) {
@@ -259,88 +237,21 @@ public class JettyAdminServer implements AdminServer {
 
             // Extract keyword arguments to command from request parameters
             @SuppressWarnings("unchecked") Map<String, String[]> parameterMap = request.getParameterMap();
-            Map<String, String> kwargs = new HashMap<>();
+            Map<String, String> kwargs = new HashMap<String, String>();
             for (Map.Entry<String, String[]> entry : parameterMap.entrySet()) {
                 kwargs.put(entry.getKey(), entry.getValue()[0]);
             }
-            final String authInfo = request.getHeader(HttpHeader.AUTHORIZATION.asString());
 
             // Run the command
-            final CommandResponse cmdResponse = Commands.runGetCommand(cmd, zkServer, kwargs, authInfo, request);
-            response.setStatus(cmdResponse.getStatusCode());
+            CommandResponse cmdResponse = Commands.runCommand(cmd, zkServer, kwargs);
 
-            final Map<String, String> headers = cmdResponse.getHeaders();
-            for (final Map.Entry<String, String> header : headers.entrySet()) {
-                response.addHeader(header.getKey(), header.getValue());
-            }
-            final String clientIP = IPAuthenticationProvider.getClientIPAddress(request);
-            if (cmdResponse.getInputStream() == null) {
-                // Format and print the output of the command
-                CommandOutputter outputter = new JsonOutputter(clientIP);
-                response.setContentType(outputter.getContentType());
-                outputter.output(cmdResponse, response.getWriter());
-            } else {
-                // Stream out the output of the command
-                CommandOutputter outputter = new StreamOutputter(clientIP);
-                response.setContentType(outputter.getContentType());
-                outputter.output(cmdResponse, response.getOutputStream());
-            }
-        }
-
-        /**
-         * Serves HTTP POST requests. It reads request payload as raw data.
-         * It's up to each command to process the payload accordingly.
-         * For example, RestoreCommand uses the payload InputStream directly
-         * to read snapshot data.
-         */
-        @Override
-        protected void doPost(final HttpServletRequest request,
-                              final HttpServletResponse response) throws ServletException, IOException {
-            final String cmdName = extractCommandNameFromURL(request, response);
-            if (cmdName != null) {
-                final String authInfo = request.getHeader(HttpHeader.AUTHORIZATION.asString());
-                final CommandResponse cmdResponse = Commands.runPostCommand(cmdName, zkServer, request.getInputStream(), authInfo, request);
-                final String clientIP = IPAuthenticationProvider.getClientIPAddress(request);
-                sendJSONResponse(response, cmdResponse, clientIP);
-            }
-        }
-
-        /**
-         * Extracts the command name from URL if it exists otherwise null
-         */
-        private String extractCommandNameFromURL(final HttpServletRequest request,
-                                                 final HttpServletResponse response) throws IOException {
-            String cmd = request.getPathInfo();
-            if (cmd == null || cmd.equals("/")) {
-                printCommandLinks(response);
-                return null;
-            }
-            // Strip leading "/"
-            return cmd.substring(1);
-        }
-
-        /**
-         * Prints the list of URLs to each registered command as response.
-         */
-        private void printCommandLinks(final HttpServletResponse response) throws IOException {
-            for (final String link : commandLinks()) {
-                response.getWriter().println(link);
-                response.getWriter().println("<br/>");
-            }
-        }
-
-        /**
-         * Send JSON string as the response.
-         */
-        private void sendJSONResponse(final HttpServletResponse response,
-                                      final CommandResponse cmdResponse,
-                                      final String clientIP) throws IOException {
-            final CommandOutputter outputter = new JsonOutputter(clientIP);
-
-            response.setStatus(cmdResponse.getStatusCode());
+            // Format and print the output of the command
+            CommandOutputter outputter = new JsonOutputter();
+            response.setStatus(HttpServletResponse.SC_OK);
             response.setContentType(outputter.getContentType());
             outputter.output(cmdResponse, response.getWriter());
         }
+
     }
 
     /**
